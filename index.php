@@ -2,7 +2,7 @@
 
 /*
 Plugin Name: WooCommerce Jeeb Payment Gateway
-Plugin URI: https://jeeb.io
+Plugin URI: https://core.jeeb.io
 Description: Pay With Jeeb Payment gateway for woocommerce
 Version: 1.0.0
 Author: Jeeb
@@ -20,6 +20,21 @@ function woocommerce_paywith_jeeb_init(){
 
     class WC_Paywith_Jeeb extends WC_Payment_Gateway{
 
+        public function error_log($contents)
+        {
+            if (false === isset($contents) || true === empty($contents)) {
+                return;
+            }
+
+            if (true === is_array($contents)) {
+                $contents = var_export($contents, true);
+            } else if (true === is_object($contents)) {
+                $contents = json_encode($contents);
+            }
+
+            error_log($contents);
+        }
+
         public function __construct(){
             $this->id = 'paywithjeeb';
             $this->method_title = 'Pay With Jeeb';
@@ -32,33 +47,21 @@ function woocommerce_paywith_jeeb_init(){
             $this -> description = $this -> settings['description'];
             $this -> signature = $this -> settings['signature'];
             $this -> notify_url = WC()->api_request_url('WC_Paywith_Jeeb');
-            $this -> currency_convert_url = "https://jeeb.io/api/convert/";
-            $this -> create_invoice_url = "https://jeeb.io/api/bitcoin/issue/";
-            $this -> payment_url = "https://jeeb.io/invoice/payment";
-            $this -> confirm_payment = "http://jeeb.io/api/bitcoin/confirm/";
-            $this -> test_currency_convert_url = "http://test.jeeb.io:9876/api/convert/";
-            $this -> test_create_invoice_url = "http://test.jeeb.io:9876/api/bitcoin/issue/";
-            $this -> test_payment_url = "http://test.jeeb.io:9876/invoice/payment";
-            $this -> test_confirm_payment = "http://test.jeeb.io:9876/api/bitcoin/confirm/";
+            $this -> base_url = "https://core.jeeb.io/api/";
             $this -> test = $this -> settings['test'];
-            // If testing is on
-            if ( $this -> test === 'yes') {
-              $this -> current_currency_convert_url = $this -> test_currency_convert_url;
-              $this -> current_create_invoice_url = $this -> test_create_invoice_url;
-              $this -> current_payment_url = $this -> test_payment_url;
-              $this -> current_confirm_payment = $this -> test_confirm_payment;
-              $this -> allowReject = (boolean) false;
+            $this -> base_cur = $this -> settings['basecoin'];
+            $this -> lang = $this -> settings['lang'];
+            $this -> target_cur = null;
+            for($i=0;$i<sizeof($this -> settings['targetcoin']);$i++){
+              $this -> target_cur .= $this -> settings['targetcoin'][$i];
+              if( $i!=sizeof($this -> settings['targetcoin'])-1) {
+                $this -> target_cur .= '/';
+              }
             }
-            // If testing is off
-            else {
-              $this -> current_currency_convert_url = $this -> currency_convert_url;
-              $this -> current_create_invoice_url = $this -> create_invoice_url;
-              $this -> current_payment_url = $this -> payment_url;
-              $this -> current_confirm_payment = $this -> confirm_payment;
-              $this -> allowReject = (boolean) true;
-            }
-            //Actions
+            if($this -> lang === 'none')
+              $this -> lang = NULL;
 
+            //Actions
             if ( version_compare( WOOCOMMERCE_VERSION, '2.0.0', '>=' ) ) {
                 add_action( 'woocommerce_update_options_payment_gateways_'.$this->id, array(&$this, 'process_admin_options' ) );
             } else {
@@ -86,12 +89,12 @@ function woocommerce_paywith_jeeb_init(){
                     'label' => 'Enable Pay With Jeeb Payment Module.',
                     'default' => 'no'),
                 'title' => array(
-                    'title' => 'Title:',
+                    'title' => 'Title',
                     'type'=> 'text',
                     'description' => 'This controls the title which the user sees during checkout.',
                     'default' => 'Pay With Jeeb'),
                 'description' => array(
-                    'title' => 'Description:',
+                    'title' => 'Description',
                     'type' => 'textarea',
                     'description' => 'This controls the description which the user sees during checkout.',
                     'default' => 'Pay securely with bitcoins through Jeeb Payment Gateway.'),
@@ -99,7 +102,42 @@ function woocommerce_paywith_jeeb_init(){
                     'title' => 'Signature',
                     'type' => 'text',
                     'description' => 'This signature is the one provided by Jeeb.'),
-                'test' => array(
+                'basecoin' => array(
+                    'title' => 'Base-Currency',
+                    'type' => 'select',
+                    'description' => 'The base currency of your website.',
+                    'options' => array(
+                      'btc' => 'BTC',
+                      'eur' => 'EUR',
+                      'irr' => 'IRR',
+                      'usd' => 'USD',
+                     ),
+                   ),
+                'targetcoin' => array(
+                    'title' => 'Target-Currency',
+                    'type' => 'multiselect',
+                    'description' => 'The target currency to which your base currency will get converted.',
+                    'options' => array(
+                      'btc' => 'BTC',
+                      'eth' => 'ETH',
+                      'xrp' => 'XRP',
+                      'xmr' => 'XMR',
+                      'bch' => 'BCH',
+                      'ltc' => 'LTC',
+                      'test-btc' => 'TEST-BTC'
+                     ),
+                   ),
+                 'lang' => array(
+                     'title' => 'Language',
+                     'type' => 'select',
+                     'description' => 'Set the language of the payment portal.',
+                     'options' => array(
+                       'none' => 'Auto-Select',
+                       'en'   => 'English',
+                       'fa'   =>'Persian'
+                      ),
+                    ),
+          'test' => array(
         				    'title'   => __( 'Test Jeeb', 'wcjeeb' ),
         				    'type'    => 'checkbox',
         				    'label'   => __( 'Connect to the Test Jeeb server for testing.', 'wcjeeb' ),
@@ -117,18 +155,24 @@ function woocommerce_paywith_jeeb_init(){
 
         }
         // Get bitcoin equivalent to irr
-        function convert_irr_to_btc ( $order_id ) {
+        function convert_base_to_target ( $order_id ) {
             global $woocommerce;
             $order = new WC_Order( $order_id );
             $amount = $order->total;
+            $url = $this -> base_url.'currency?'.$this -> signature.'&value='.$amount.'&base='.$this -> base_cur.'&target=btc';
 
-            $request = wp_remote_get( $this -> current_currency_convert_url . $this->signature.'/'.$amount.'/irr/btc',
+            error_log("Requesting Covert API with Params");
+            error_log("Url : " . $url);
+
+            $request = wp_remote_get( $url,
             array(
               'timeout'     => 120
             ) );
             $body = wp_remote_retrieve_body( $request );
             $data = json_decode( $body , true);
-            // var_dump ($data);
+
+            error_log("Response from Convert API");
+            error_log($data["result"]);
             // Return the equivalent bitcoin value acquired from Jeeb server.
             return (float) $data["result"];
 
@@ -136,19 +180,27 @@ function woocommerce_paywith_jeeb_init(){
         }
 
         // Create invoice for payment
-        function create_invoice( $order_id , $btn) {
+        function create_invoice( $order_id , $amount) {
             global $woocommerce;
             $order = new WC_Order( $order_id );
             $data = array(
-              "orderNo" => $order_id,
-              "requestAmount" => $btn,
-              "notificationUrl" => $this -> notify_url,
-              "callBackUrl" => $this->get_return_url(),
-              "allowReject" => $this -> allowReject
+              "orderNo"      => $order_id,
+              "value"        => $amount,
+              "coins"        => $this -> target_cur,
+              "webhookUrl"   => $this -> notify_url,
+              "callBackUrl"  => $this -> get_return_url(),
+              "allowReject"  => $this -> test === 'yes' ? false : true,
+              "allowTestNet" => $this -> test === 'yes' ? true : false,
+              "language"     => $this -> lang
             );
             $data_string = json_encode($data);
 
-            $url = $this -> current_create_invoice_url . $this->signature;
+            $url = $this -> base_url . 'payments/' . $this->signature . '/issue/';
+
+            error_log("Creating Invoice with Params");
+            error_log("Url : " . $url);
+            error_log("Params : " . $data_string);
+
             $response = wp_remote_post(
                             $url,
                             array(
@@ -161,9 +213,9 @@ function woocommerce_paywith_jeeb_init(){
 
             $body = wp_remote_retrieve_body( $response );
             $data = json_decode( $body , true);
-            // var_dump ($data);
-            // Store the token in the database
-            update_post_meta($order->id, 'jeeb_invoice_token', $data['result']['token'] );
+
+            error_log("Response from Create Invoice API");
+            error_log("Response => " . json_encode($data["result"]));
 
             return $data['result']['token'];
 
@@ -172,7 +224,7 @@ function woocommerce_paywith_jeeb_init(){
         function redirect_payment( $token ) {
 
           // Using Auto-submit form to redirect user with the token
-          return "<form id='form' method='post' action='".$this -> current_payment_url."'>".
+          return "<form id='form' method='post' action='". $this -> base_url . "payments/invoice" . "'>".
                   "<input type='hidden' autocomplete='off' name='token' value='".$token."'/>".
                  "</form>".
                  "<script type='text/javascript'>".
@@ -184,10 +236,10 @@ function woocommerce_paywith_jeeb_init(){
         // Displaying text on the receipt page and sending requests to Jeeb server.
         function receipt_page( $order ) {
             echo '<p>Thank you ! Your order is now pending payment. You should be automatically redirected to Jeeb to make payment.</p>';
-            // Convert irr to btn
-            echo $btn = $this->convert_irr_to_btc ( $order );
+            // Convert Base to Target
+            $amount = $this->convert_base_to_target ( $order );
             // Create Invoice for payment in the Jeeb server
-            echo $token = $this->create_invoice ( $order , $btn );
+            $token = $this->create_invoice ( $order , $amount );
             // Redirecting user for the payment
             echo $this->redirect_payment ( $token );
         }
@@ -215,30 +267,22 @@ function woocommerce_paywith_jeeb_init(){
 
         }
         // Process the payment response acquired from Jeeb
-        function payment_response( $order ) {
+        function payment_response( $order_id ) {
             global $woocommerce;
+            // error_log("Hey".json_encode($_REQUEST));
 
-            if(isset($_POST["notificationUrl"])) {
-              $order = new WC_Order($_POST["orderNo"]);
+            $order = new WC_Order($order_id);
+
+            if ($_REQUEST["stateId"]==3){
+              echo "Your Payment was successful and we are awaiting for blockchain network to confirm the payment.";
             }
-
-            if ($_POST["stateId"]==3){
-              echo "Your Payment was successful and we are awaiting for bitcoin network to confirm the payment.";
-              // Order is Paid but not yet confirmed, put it On-Hold (Awaiting Payment).
-              $order->update_status('on-hold', __('Bitcoin payment received, awaiting confirmation.', 'wcjeeb'));
-              // Reduce stock level
-              $order->reduce_order_stock();
-              // Empty cart
-              WC()->cart->empty_cart();
-
-            }
-            if ($_POST["stateId"]==5){
+            if ($_REQUEST["stateId"]==5){
               echo "Your Payment was expired. To pay again please go to checkout page.";
               $order->add_order_note(__('Payment was unsuccessful', 'wcjeeb'));
               // Cancel order
               $order->cancel_order('Bitcoin payment expired.');
             }
-            if ($_POST["stateId"]==7){
+            if ($_REQUEST["stateId"]==7){
               echo "Partial payment Received";
               $order->add_order_note(__('Partial Payment was received', 'wcjeeb'));
               // Partial order received, waiting for full payment
@@ -254,71 +298,96 @@ function woocommerce_paywith_jeeb_init(){
             $postdata = file_get_contents("php://input");
             $json = json_decode($postdata, true);
 
-            global $woocommerce;
-            global $wpdb;
+            if($json["signature"] == $this -> signature)
+            {
+              global $woocommerce;
+              global $wpdb;
 
-            $order = new WC_Order($json["orderNo"]);
+              $order = new WC_Order($json["orderNo"]);
 
-            $token = $wpdb->get_row("SELECT meta_value FROM $wpdb->postmeta WHERE meta_key='jeeb_invoice_token' AND post_id='".$json["orderNo"]."'");
+              $token = $json["token"];
 
-            if ( $json['stateId']== 1 ) {
-              $order->add_order_note(__('Notification from Jeeb - Payment was created', 'wcjeeb'));
-            }
-            else if ( $json['stateId']== 2 ) {
-              $order->add_order_note(__('Notification from Jeeb - Waiting for payment', 'wcjeeb'));
-            }
-            else if ( $json['stateId']== 3 ) {
-              $order->add_order_note(__('Notification from Jeeb - Waiting for payment confirmation', 'wcjeeb'));
-            }
-            else if ( $json['stateId']== 4 ) {
-              $order->add_order_note(__('Payment is now confirmed by bitcoin network', 'wcjeeb'));
-
-              $data = array(
-                "token" => $token->meta_value,
-              );
-
-              $data_string = json_encode($data);
-
-              $url = $this -> current_confirm_payment .$json["signature"];
-              $response = wp_remote_post(
-                              $url,
-                              array(
-                                  'method'      => 'POST',
-                                  'timeout'     => 45,
-                                  'headers'     => array( "content-type" => "application/json"),
-                                  'body' => $data_string
-                              )
-                          );
-
-              $body = wp_remote_retrieve_body( $response );
-              $response = json_decode( $body , true);
-              var_dump($data);
-
-              if($response['result']['isConfirmed']){
-                $order->add_order_note(__('Confirm Payment with jeeb was successful', 'wcjeeb'));
-
-                $order->payment_complete();
-
+              if ( $json['stateId']== 2 ) {
+                $order->add_order_note(__('Notification from Jeeb - Waiting for payment', 'wcjeeb'));
+                error_log("Notification from Jeeb - Waiting for payment");
               }
-              else {
-                $order->add_order_note(__('Confirm Payment was rejected by Jeeb', 'wcjeeb'));
+              else if ( $json['stateId']== 3 ) {
+                $order->add_order_note(__('Notification from Jeeb - Waiting for payment confirmation', 'wcjeeb'));
 
-                $order->update_status('on-hold', __('Jeeb confirm payment failed', 'wcjeeb'));
+                // Reduce stock level
+                if (function_exists('wc_reduce_stock_levels'))
+                {
+                wc_reduce_stock_levels($order_id);
+                }
+                else
+                {
+                    $order->reduce_order_stock();
+                }
 
+                // Empty cart
+                WC()->cart->empty_cart();
+
+                // Order is Paid but not yet confirmed, put it On-Hold (Awaiting Payment).
+                $order->update_status('on-hold', __('Payment received, awaiting confirmation.', 'wcjeeb'));
+                error_log("Notification from Jeeb - Waiting for payment confirmation");
               }
-            }
-            else if ( $json['stateId']== 5 ) {
-              $order->add_order_note(__('Notification from Jeeb - Payment was expired', 'wcjeeb'));
-            }
-            else if ( $json['stateId']== 6 ) {
-              $order->add_order_note(__('Notification from Jeeb - Over payment occurred', 'wcjeeb'));
-            }
-            else if ( $json['stateId']== 7 ) {
-              $order->add_order_note(__('Notification from Jeeb - Under payment occurred', 'wcjeeb'));
-            }
-            else{
-              $order->add_order_note(__('Notification from Jeeb could not be proccessed - Error in reading state Id ', 'wcjeeb'));
-            }
+              else if ( $json['stateId']== 4 ) {
+                $order->add_order_note(__('Payment is now confirmed by blockchain network', 'wcjeeb'));
+                error_log("Payment is now confirmed by blockchain network");
+
+                $data = array(
+                  "token" => $token,
+                );
+
+                $data_string = json_encode($data);
+
+                $url = $this -> base_url . 'payments/' .$json["signature"] . '/confirm' ;
+                $response = wp_remote_post(
+                                $url,
+                                array(
+                                    'method'      => 'POST',
+                                    'timeout'     => 45,
+                                    'headers'     => array( "content-type" => "application/json"),
+                                    'body' => $data_string
+                                )
+                            );
+
+                $body = wp_remote_retrieve_body( $response );
+                $response = json_decode( $body , true);
+                
+                if($response['result']['isConfirmed']){
+                  $order->add_order_note(__('Confirm Payment with jeeb was successful', 'wcjeeb'));
+                  error_log("Confirm Payment with jeeb was successful");
+
+                  $order->payment_complete();
+
+                }
+                else {
+                  $order->add_order_note(__('Confirm Payment was rejected by Jeeb', 'wcjeeb'));
+                  error_log("Confirm Payment was rejected by Jeeb");
+
+                  $order->update_status('on-hold', __('Jeeb confirm payment failed', 'wcjeeb'));
+
+                }
+              }
+              else if ( $json['stateId']== 5 ) {
+                $order->add_order_note(__('Notification from Jeeb - Payment was expired', 'wcjeeb'));
+                error_log("Notification from Jeeb - Payment was expired");
+              }
+              else if ( $json['stateId']== 6 ) {
+                $order->add_order_note(__('Notification from Jeeb - Over payment occurred', 'wcjeeb'));
+                error_log("Notification from Jeeb - Over payment occurred");
+              }
+              else if ( $json['stateId']== 7 ) {
+                $order->add_order_note(__('Notification from Jeeb - Under payment occurred', 'wcjeeb'));
+                error_log("Notification from Jeeb - Under payment occurred");
+              }
+              else{
+                $order->add_order_note(__('Notification from Jeeb could not be proccessed - Error in reading state Id ', 'wcjeeb'));
+                error_log("Notification from Jeeb could not be proccessed - Error in reading state Id");
+              }
+          }
+          header("HTTP/1.1 200 OK");
 
         }
 
