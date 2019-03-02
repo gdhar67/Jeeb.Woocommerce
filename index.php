@@ -52,6 +52,7 @@ function woocommerce_paywith_jeeb_init(){
             $this -> base_cur = $this -> settings['basecoin'];
             $this -> lang = $this -> settings['lang'];
             $this -> target_cur = null;
+            // if($this -> base_cur == 'toman')
             for($i=0;$i<sizeof($this -> settings['targetcoin']);$i++){
               $this -> target_cur .= $this -> settings['targetcoin'][$i];
               if( $i!=sizeof($this -> settings['targetcoin'])-1) {
@@ -110,7 +111,8 @@ function woocommerce_paywith_jeeb_init(){
                       'btc' => 'BTC',
                       'eur' => 'EUR',
                       'irr' => 'IRR',
-                      'usd' => 'USD',
+                      'toman'=>'TOMAN',
+                      'usd' => 'USD'
                      ),
                    ),
                 'targetcoin' => array(
@@ -159,6 +161,10 @@ function woocommerce_paywith_jeeb_init(){
             global $woocommerce;
             $order = new WC_Order( $order_id );
             $amount = $order->total;
+            if($this -> base_cur=='toman'){
+              $this -> base_cur='irr';
+              $amount *= 10;
+            }
             $url = $this -> base_url.'currency?'.$this -> signature.'&value='.$amount.'&base='.$this -> base_cur.'&target=btc';
 
             error_log("Requesting Covert API with Params");
@@ -354,7 +360,7 @@ function woocommerce_paywith_jeeb_init(){
 
                 $body = wp_remote_retrieve_body( $response );
                 $response = json_decode( $body , true);
-                
+
                 if($response['result']['isConfirmed']){
                   $order->add_order_note(__('Confirm Payment with jeeb was successful', 'wcjeeb'));
                   error_log("Confirm Payment with jeeb was successful");
